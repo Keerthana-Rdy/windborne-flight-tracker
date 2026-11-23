@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WindBorne Flight Explorer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .hud{
+      position:fixed;left:8px;top:8px;background:#fff;padding:8px 10px;border-radius:8px;
+      font:12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      border:1px solid #ddd; box-shadow:0 1px 4px rgba(0,0,0,.06);
+    }
+    .err{ color:#b00 }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="hud" id="hud">Loading…</div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    /** ---------- config ---------- **/
+    const HUD  = document.getElementById('hud');
+    // Cloudflare Worker (CORS proxy) that mirrors a.windbornesystems.com/treasure/<hh>.json
+    const BASE = 'https://windborne-cors-proxy.keerthanareddypanyala.workers.dev/treasure';
+    console.log('Using BASE:', BASE);
+
+    // color by hour when drawing multiple hours
+    const HOUR_COLOR = {
+      '00':'#1f77b4','01':'#9467bd','02':'#2ca02c',
+      '13':'#ff7f0e','14':'#d62728','15':'#17becf',
+      '16':'#bcbd22','17':'#8c564b','18':'#e377c2'
+    };
+
+    /** ---------- map ---------- **/
+    const MAP = L.map('map', { preferCanvas: true }).setView([20, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 7, attribution: '© OSM'
+    }).addTo(MAP);
+
+    // Use a canvas renderer for performance + a group to manage points
+    const RENDERER = L.canvas({ padding: 0.5 });
+    const GROUP = L.layerGroup().addTo(MAP);
+    function clearLayer(){ GROUP.clearLayers(); }
+
+    /** draw a single hour file as points */
+    async function drawHour(hh) {
+      const hr  = String(hh).padStart(2, '0');
+      const url = `${BASE}/${hr}.json`;
+      const resp = await fetch(url, { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
+      const rows = await resp.json();        // expected: [[lat, lon, ...], ...]
+
+      let n = 0;
+      const fitPts = [];
+
+      for (const pt of rows) {
+        // dataset shape: [lat, lon, ...]
+        if (Array.isArray(pt) && pt.length >= 2) {
+          const lat = +pt[0], lon = +pt[1];
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            fitPts.push([lat, lon]);
+            L.circleMarker([lat, lon], {
+              renderer: RENDERER,
+              radius: 2.3,
+              color: HOUR_COLOR[hr] || '#39f',
+              weight: 0,
+              fillOpacity: 0.85
+            }).addTo(GROUP);
+            n++;
+          }
+        }
+      }
+
+      if (fitPts.length) MAP.fitBounds(fitPts, { padding: [10, 10] });
+      console.log(`Drew ${n} points from ${hr}.json`);
+      return n;
+    }
+
+    /** draw several hours (clears layer first) */
+    async function drawMany(hours){
+      clearLayer();
+      let total = 0;
+      for (const h of hours) total += await drawHour(h);
+      HUD.textContent = `Hours: ${hours.join(', ')} • Total points: ${total.toLocaleString()}`;
+      return total;
+    }
+
+    /** helper: list of last N UTC hours, oldest → newest */
+    function hoursBack(n = 6) {
+      const now = new Date(); // current UTC time
+      return [...Array(n)]
+        .map((_, i) => String((now.getUTCHours() - i + 24) % 24).padStart(2, '0'))
+        .reverse();
+    }
+
+    /** initial render + refresh every 5 minutes */
+    async function drawLastN(n = 6){
+      HUD.textContent = 'Loading…';
+      try {
+        await drawMany(hoursBack(n));
+      } catch (e) {
+        console.error(e);
+        HUD.innerHTML = `<span class="err">Load failed: ${e.message}</span>`;
+      }
+    }
+
+    drawLastN(6);
+    setInterval(() => drawLastN(6), 5 * 60 * 1000);
+
+    // Expose helpers for quick testing in DevTools
+    window.WB = { drawHour, drawMany, clearLayer, hoursBack, MAP };
+  </script>
+</body>
+</html>
